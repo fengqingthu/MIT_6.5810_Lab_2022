@@ -29,11 +29,6 @@
 static inline int
 port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
-	// Given port0 is used for linux and ssh, we do not initialize 
-	// port 0 and return early
-	if (port == 0)
-		return 0;
-
 	struct rte_eth_conf port_conf;
 	const uint16_t rx_rings = 1, tx_rings = 1;
 	uint16_t nb_rxd = RX_RING_SIZE;
@@ -128,7 +123,7 @@ lcore_main(void)
 	 * for best performance.
 	 */
 	RTE_ETH_FOREACH_DEV(port)
-		if (rte_eth_dev_socket_id(port) >= 0 &&
+		if (port == 1 && rte_eth_dev_socket_id(port) >= 0 &&
 				rte_eth_dev_socket_id(port) !=
 						(int)rte_socket_id())
 			printf("WARNING, port %u is on remote NUMA node to "
@@ -140,13 +135,11 @@ lcore_main(void)
 
 	/* Main work of application loop. 8< */
 	for (;;) {
-		/*
-		 * Receive packets on a port and forward them on the paired
-		 * port. The mapping is 0 -> 1, 1 -> 0, 2 -> 3, 3 -> 2, etc.
-		 */
 		RTE_ETH_FOREACH_DEV(port) {
+			/* Get burst of RX packets, from port1 */
+			if (port == 1)
+				continue;
 
-			/* Get burst of RX packets, from first port of pair. */
 			struct rte_mbuf *bufs[BURST_SIZE];
 			struct rte_mbuf *pkt;
 			struct rte_ether_hdr *eth_h;
@@ -166,10 +159,17 @@ lcore_main(void)
 				continue;
 
 			uint8_t nb_replies = 0;
+			uint8_t rx_idx = 0;
 			for (i = 0; i < nb_rx; i++) {
 				pkt = bufs[i];
-				eth_h = rte_pktmbuf_mtod(pkt, struct ether_hdr *);
-				if (RTE_BE_TO_CPU_16(eth_h->ether_type) != RTE_ETHER_TYPE_IPV4) {
+				FILE *fp;
+				char *fname;
+				sprintf(fname, "/opt/fengqing/tmp/pkt_%d", rx_idx++);
+				fp = fopen(fname ,"a");
+				rte_pktmbuf_dump(fp, pkt, 0);
+
+				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+				if (rte_be_to_cpu_16(eth_h->ether_type) != RTE_ETHER_TYPE_IPV4) {
 					rte_pktmbuf_free(pkt);
 					continue;
 				}
@@ -177,7 +177,7 @@ lcore_main(void)
 				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
 				sizeof(struct rte_ether_hdr));
 				
-				icmp_h = (struct icmp_hdr *) (struct rte_icmp_hdr *)(ip_h + 1);
+				icmp_h = (struct rte_icmp_hdr *) (struct rte_icmp_hdr *)(ip_h + 1);
 
 				if (! ((ip_h->next_proto_id == IPPROTO_ICMP) &&
 					(icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) &&
@@ -211,8 +211,9 @@ lcore_main(void)
 			}
 
 			/* Send back echo replies. */
+			uint16_t nb_tx = 0;
 			if (nb_replies > 0) {
-				const uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_replies);
+				nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_replies);
 			}
 
 			/* Free any unsent packets. */
@@ -220,7 +221,7 @@ lcore_main(void)
 				uint16_t buf;
 				for (buf = nb_tx; buf < nb_rx; buf++)
 					rte_pktmbuf_free(bufs[buf]);
-			}
+			}	
 		}
 	}
 	/* >8 End of loop. */
@@ -264,7 +265,7 @@ main(int argc, char *argv[])
 
 	/* Initializing all ports. 8< */
 	RTE_ETH_FOREACH_DEV(portid)
-		if (port_init(portid, mbuf_pool) != 0)
+		if (portid == 1 && port_init(portid, mbuf_pool) != 0)
 			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 					portid);
 	/* >8 End of initializing all ports. */
