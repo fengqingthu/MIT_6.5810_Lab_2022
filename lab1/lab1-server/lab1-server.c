@@ -202,7 +202,7 @@ lcore_main(void)
 				
 				icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
 				icmp_h->icmp_cksum = 0;
-				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, sizeof(struct rte_icmp_hdr));
+				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->buf_len - sizeof(eth_h) - sizeof(ip_h));
 				/* Hard code icmp checksum, this is what I found online, 
 					though looks a bit weird. */
 				/* cksum = ~icmp_h->icmp_cksum & 0xffff;
