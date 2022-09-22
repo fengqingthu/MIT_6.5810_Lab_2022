@@ -165,8 +165,9 @@ lcore_main(void)
 				/* FILE *fp;
 				char *fname;
 				sprintf(fname, "/opt/fengqing/tmp/pkt_%d", rx_idx++);
-				fp = fopen(fname ,"a");
-				rte_pktmbuf_dump(fp, pkt, 0); */
+				fp = fopen(fname ,"a");*/
+				printf("received:\n");
+				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 
 				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 				/* if (eth_h->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
@@ -175,9 +176,9 @@ lcore_main(void)
 				} */
 
 				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
-				sizeof(struct rte_ether_hdr));
+					sizeof(struct rte_ether_hdr));
 				
-				icmp_h = (struct rte_icmp_hdr *) (struct rte_icmp_hdr *)(ip_h + 1);
+				icmp_h = (struct rte_icmp_hdr *)(ip_h + 1);
 
 				if (! ((ip_h->next_proto_id == IPPROTO_ICMP) &&
 					(icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) &&
@@ -186,12 +187,14 @@ lcore_main(void)
 					continue;
 				}
 
-				/* Prepare echo reply. */
+				printf("start preparing echo reply\n");
+				/* Swap ether addresses. */
 				rte_ether_addr_copy(&eth_h->src_addr, &eth_addr);
 				rte_ether_addr_copy(&eth_h->dst_addr, &eth_h->src_addr);
 				rte_ether_addr_copy(&eth_addr, &eth_h->dst_addr);
+
+				/* Assuming the ip addresses is not multicast, simply swap. */
 				ip_addr = ip_h->src_addr;
-				/* Assuming the dst addr is not multicast. */
 				ip_h->src_addr = ip_h->dst_addr;
 				ip_h->dst_addr = ip_addr;
 				ip_h->hdr_checksum = 0;
@@ -201,14 +204,15 @@ lcore_main(void)
 				icmp_h->icmp_cksum = 0;
 				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, sizeof(struct rte_icmp_hdr));
 				/* Hard code icmp checksum, this is what I found online, 
-				tested workable though looks a bit weird. */
+					though looks a bit weird. */
 				/* cksum = ~icmp_h->icmp_cksum & 0xffff;
 				cksum += ~htons(RTE_IP_ICMP_ECHO_REQUEST << 8) & 0xffff;
 				cksum += htons(RTE_IP_ICMP_ECHO_REPLY << 8) & 0xffff;
 				cksum = (cksum & 0xffff) + (cksum >> 16);
 				cksum = (cksum & 0xffff) + (cksum >> 16);
 				icmp_h->icmp_cksum = ~cksum & 0xffff; */
-
+				printf("modified:\n");
+				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 				bufs[nb_replies++] = pkt;
 			}
 
