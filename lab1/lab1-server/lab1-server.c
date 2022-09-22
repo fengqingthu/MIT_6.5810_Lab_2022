@@ -159,21 +159,18 @@ lcore_main(void)
 				continue;
 
 			uint8_t nb_replies = 0;
-			uint8_t rx_idx = 0;
 			for (i = 0; i < nb_rx; i++) {
 				pkt = bufs[i];
 				/* FILE *fp;
 				char *fname;
 				sprintf(fname, "/opt/fengqing/tmp/pkt_%d", rx_idx++);
 				fp = fopen(fname ,"a");*/
-				printf("received:\n");
-				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 
 				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-				/* if (eth_h->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+				if (eth_h->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
 					rte_pktmbuf_free(pkt);
 					continue;
-				} */
+				}
 
 				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
 					sizeof(struct rte_ether_hdr));
@@ -186,6 +183,8 @@ lcore_main(void)
 					rte_pktmbuf_free(pkt);
 					continue;
 				}
+				printf("received:\n");
+				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 
 				printf("start preparing echo reply\n");
 				/* Swap ether addresses. */
@@ -202,7 +201,7 @@ lcore_main(void)
 				
 				icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
 				icmp_h->icmp_cksum = 0;
-				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->buf_len - sizeof(eth_h) - sizeof(ip_h));
+				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->pkt_len - sizeof(eth_h) - sizeof(ip_h));
 				/* Hard code icmp checksum, this is what I found online, 
 					though looks a bit weird. */
 				/* cksum = ~icmp_h->icmp_cksum & 0xffff;
