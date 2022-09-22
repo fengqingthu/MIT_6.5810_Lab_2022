@@ -137,7 +137,7 @@ lcore_main(void)
 	for (;;) {
 		RTE_ETH_FOREACH_DEV(port) {
 			/* Get burst of RX packets, from port1 */
-			if (port == 1)
+			if (port != 1)
 				continue;
 
 			struct rte_mbuf *bufs[BURST_SIZE];
@@ -162,17 +162,17 @@ lcore_main(void)
 			uint8_t rx_idx = 0;
 			for (i = 0; i < nb_rx; i++) {
 				pkt = bufs[i];
-				FILE *fp;
+				/* FILE *fp;
 				char *fname;
 				sprintf(fname, "/opt/fengqing/tmp/pkt_%d", rx_idx++);
 				fp = fopen(fname ,"a");
-				rte_pktmbuf_dump(fp, pkt, 0);
+				rte_pktmbuf_dump(fp, pkt, 0); */
 
 				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-				if (rte_be_to_cpu_16(eth_h->ether_type) != RTE_ETHER_TYPE_IPV4) {
+				/* if (eth_h->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
 					rte_pktmbuf_free(pkt);
 					continue;
-				}
+				} */
 
 				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
 				sizeof(struct rte_ether_hdr));
@@ -194,18 +194,20 @@ lcore_main(void)
 				/* Assuming the dst addr is not multicast. */
 				ip_h->src_addr = ip_h->dst_addr;
 				ip_h->dst_addr = ip_addr;
+				ip_h->hdr_checksum = 0;
 				ip_h->hdr_checksum = rte_ipv4_cksum(ip_h);
 				
 				icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
-
+				icmp_h->icmp_cksum = 0;
+				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, sizeof(struct rte_icmp_hdr));
 				/* Hard code icmp checksum, this is what I found online, 
 				tested workable though looks a bit weird. */
-				cksum = ~icmp_h->icmp_cksum & 0xffff;
+				/* cksum = ~icmp_h->icmp_cksum & 0xffff;
 				cksum += ~htons(RTE_IP_ICMP_ECHO_REQUEST << 8) & 0xffff;
-				cksum += htons(RTE_IP_ICMP_ECHO_REPLY << 8);
+				cksum += htons(RTE_IP_ICMP_ECHO_REPLY << 8) & 0xffff;
 				cksum = (cksum & 0xffff) + (cksum >> 16);
 				cksum = (cksum & 0xffff) + (cksum >> 16);
-				icmp_h->icmp_cksum = ~cksum;
+				icmp_h->icmp_cksum = ~cksum & 0xffff; */
 
 				bufs[nb_replies++] = pkt;
 			}
