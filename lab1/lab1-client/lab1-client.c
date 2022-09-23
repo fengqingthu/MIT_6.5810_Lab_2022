@@ -17,6 +17,7 @@
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
+#define NUM_PING 500000
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
@@ -107,6 +108,38 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 }
 /* >8 End of main functional part of port initialization. */
 
+/* Construct the hardcoded ping packet. */
+static struct rte_mbuf *
+construct_ping_packet(struct rte_mempool *mbuf_pool)
+{
+	struct rte_mbuf *icmpbuf  = rte_pktmbuf_alloc(mbuf_pool);
+	if (!icmpbuf) {
+		rte_exit(EXIT_FAILURE, "rte_pktmbuf_alloc\n");
+	}
+	icmpbuf->pkt_len = 98;
+	icmpbuf->data_len = 98;
+	icmpbuf->buf_len = 2176;
+	icmpbuf->nb_segs = 1;
+	icmpbuf->ol_flags = 0x80;
+	icmpbuf->port = 2;
+	icmpbuf->packet_type = 0x691;
+	icmpbuf->data_off = 128;
+	icmpbuf->refcnt = 1;
+	icmpbuf->next = NULL;
+	
+	uint8_t *pkt_data = rte_pktmbuf_mtod(icmpbuf, uint8_t *);
+	unsigned char *hardcode[] = 
+		{0x0C, 0x42, 0xA1, 0x8B, 0x31, 0x60, 0x0C, 0x42, 0xA1, 0x8B, 0x31, 0x20, 0x08, 0x00, 0x45, 0x00,
+		0x00, 0x54, 0x7E, 0xEC, 0x40, 0x00, 0x40, 0x01, 0x26, 0x67, 0xC0, 0xA8, 0x0A, 0x02, 0xC0, 0xA8,
+		0x0A, 0x03, 0x08, 0x00, 0x68, 0x87, 0x00, 0x57, 0x27, 0x10, 0x52, 0xCF, 0x2C, 0x63, 0x00, 0x00,
+		0x00, 0x00, 0x26, 0x0C, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+		0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+		0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+		0x36, 0x37};
+	rte_memcpy(pkt_data, hardcode, 98);
+	return icmpbuf;
+}
+
 /*
  * The lcore main. This is the main thread that does the work, reading from
  * an input port and writing to an output port.
@@ -114,9 +147,12 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
  /* Basic forwarding application lcore. 8< */
 static __rte_noreturn void
-lcore_main(void)
+lcore_main()
 {
 	uint16_t port;
+	uint64_t hz = rte_get_timer_hz(); 
+	uint64_t begin = rte_rdtsc_precise(); 
+	uint32_t seq = 0;
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
@@ -139,93 +175,59 @@ lcore_main(void)
 			/* Get burst of RX packets, from port1 */
 			if (port != 2)
 				continue;
+			if (seq <= NUM_PING) {
+				struct rte_mbuf *pkt = construct_ping_packet();
+				struct rte_icmp_hdr *icmphdr = rte_pktmbuf_mtod_offset(pkt, struct rte_icmp_hdr *, 
+					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
+				/* Increment seq number. */
+				icmphdr->icmp_seq_nb = rte_cpu_to_be_16(seq++);
+				icmp_h->icmp_cksum = 0;
+				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr));
 
+				/* Send ping. */
+				printf("To be sent:\n");
+				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
+				const uint16_t nb_tx = rte_eth_tx_burst(port, 0, pkt, 1);
+				if (unlikely(nb_tx != 1)) {
+					rte_exit(EXIT_FAILURE, "Error: fail to send initial ping pkt\n");
+				}
+			}
+			
 			struct rte_mbuf *bufs[BURST_SIZE];
-			struct rte_mbuf *pkt;
-			struct rte_ether_hdr *eth_h;
-			struct rte_ipv4_hdr *ip_h;
-			struct rte_icmp_hdr *icmp_h;
-			struct rte_ether_addr eth_addr;
-			uint32_t ip_addr;
-			uint8_t i;
-			uint8_t nb_replies = 0;
-
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			
+			/* Free received packets. */
+			uint8_t i;
 			for (i = 0; i < nb_rx; i++) {
-				pkt = bufs[i];
-
-				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-				if (eth_h->ether_type != rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4)) {
-					rte_pktmbuf_free(pkt);
-					continue;
-				}
-
-				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
-					sizeof(struct rte_ether_hdr));
-				
-				icmp_h = (struct rte_icmp_hdr *)(ip_h + 1);
-
-				if (! ((ip_h->next_proto_id == IPPROTO_ICMP) &&
-					(icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) &&
-					(icmp_h->icmp_code == 0))) {
-					rte_pktmbuf_free(pkt);
-					continue;
-				}
-				/* printf("received:\n");
-				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
-
-				/* Swap ether addresses. */
-				rte_ether_addr_copy(&eth_h->src_addr, &eth_addr);
-				rte_ether_addr_copy(&eth_h->dst_addr, &eth_h->src_addr);
-				rte_ether_addr_copy(&eth_addr, &eth_h->dst_addr);
-
-				/* Assuming the ip addresses is not multicast, simply swap. */
-				ip_addr = ip_h->src_addr;
-				ip_h->src_addr = ip_h->dst_addr;
-				ip_h->dst_addr = ip_addr;
-				ip_h->hdr_checksum = 0;
-				ip_h->hdr_checksum = rte_ipv4_cksum(ip_h);
-				
-				icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
-				icmp_h->icmp_cksum = 0;
-				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->pkt_len - sizeof(eth_h) - sizeof(ip_h));
-
-				/* printf("modified:\n");
-				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
-				bufs[nb_replies++] = pkt;
+				if (rte_pktmbuf_mtod_offset(bufs[i], struct rte_icmp_hdr *, 
+					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)))->icmp_seq_nb >= rte_cpu_to_be_16(NUM_PING)) {
+						uint64_t elapsed_cycles = rte_rdtsc_precise() - begin; 
+						uint64_t microseconds= elapsed_cycles * 1000000 / hz;
+						printf("%d packets transmitted, rtt avg= %d\n", NUM_PING, microseconds / NUM_PING)
+					};
+				rte_pktmbuf_free(bufs[i]);
 			}
-
-			/* Send back echo replies. */
-			uint16_t nb_tx = 0;
-			if (nb_replies > 0) {
-				nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_replies);
-			}
-
-			/* Free any unsent packets. */
-			if (unlikely(nb_tx < nb_rx)) {
-				uint16_t buf;
-				for (buf = nb_tx; buf < nb_rx; buf++)
-					rte_pktmbuf_free(bufs[buf]);
-			}	
 		}
 	}
 	/* >8 End of loop. */
 }
 /* >8 End Basic forwarding application lcore. */
 
+/* Define the mempool globally */
+struct rte_mempool *mbuf_pool = NULL;
+
 /*
  * The main function, which does initialization and calls the per-lcore
  * functions.
  */
+
 int
 main(int argc, char *argv[])
 {
-	struct rte_mempool *mbuf_pool;
+	
 	unsigned nb_ports;
 	uint16_t portid;
 
@@ -263,6 +265,7 @@ main(int argc, char *argv[])
 	if (rte_lcore_count() > 1)
 		printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
 
+	uint8_t *pkt_data = rte_pktmbuf_mtod(icmpbuf, uint8_t *);
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
 	lcore_main();
 	/* >8 End of called on single lcore. */
