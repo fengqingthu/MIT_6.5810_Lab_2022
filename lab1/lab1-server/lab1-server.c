@@ -117,6 +117,12 @@ static __rte_noreturn void
 lcore_main(void)
 {
 	uint16_t port;
+	uint64_t hz = rte_get_timer_hz(); 
+	uint64_t begin;
+	uint64_t totalus = 0;
+	uint64_t indpdk = 0;
+	uint64_t startdpdk;
+	uint32_t rec = 0;
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
@@ -150,7 +156,9 @@ lcore_main(void)
 			uint8_t i;
 			uint8_t nb_replies = 0;
 
+			startdpdk = rte_rdtsc_precise();
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
+			indpdk += rte_rdtsc_precise() - startdpdk;
 
 			if (unlikely(nb_rx == 0))
 				continue;
@@ -178,7 +186,9 @@ lcore_main(void)
 				}
 				/* printf("received:\n");
 				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
-
+				rec++;
+				if (rec == 1)
+					begin = rte_rdtsc_precise();
 				/* Swap ether addresses. */
 				rte_ether_addr_copy(&eth_h->src_addr, &eth_addr);
 				rte_ether_addr_copy(&eth_h->dst_addr, &eth_h->src_addr);
@@ -203,7 +213,15 @@ lcore_main(void)
 			/* Send back echo replies. */
 			uint16_t nb_tx = 0;
 			if (nb_replies > 0) {
+				startdpdk = rte_rdtsc_precise();
 				nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_replies);
+				indpdk += rte_rdtsc_precise() - startdpdk;
+			}
+
+			if (rec == 500000) {
+				printf("%d packets received, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
+						rec, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
+				rec++;
 			}
 
 			/* Free any unsent packets. */

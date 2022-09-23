@@ -17,7 +17,7 @@
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
-const static uint32_t NUM_PING = 10000;
+const static uint32_t NUM_PING = 500000;
 
 /* Define the mempool globally */
 struct rte_mempool *mbuf_pool = NULL;
@@ -154,7 +154,10 @@ lcore_main()
 {
 	uint16_t port;
 	uint64_t hz = rte_get_timer_hz(); 
-	uint64_t begin = rte_rdtsc_precise(); 
+	uint64_t begin = rte_rdtsc_precise();
+	uint64_t totalus = 0;
+	uint64_t indpdk = 0;
+	uint64_t startdpdk;
 	uint32_t seq = 0;
 	uint32_t rec = 0;
 
@@ -186,23 +189,24 @@ lcore_main()
 				struct rte_mbuf *pkt = construct_ping_packet();
 				struct rte_icmp_hdr *icmphdr = rte_pktmbuf_mtod_offset(pkt, struct rte_icmp_hdr *, 
 					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
-				/* Increment seq number. */
-				/* icmphdr->icmp_seq_nb = rte_cpu_to_be_16(seq++);
-				icmphdr->icmp_cksum = 0;
-				icmphdr->icmp_cksum = ~rte_raw_cksum(icmphdr, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr)); */
-
 				/* Send ping. */
-				printf("To be sent:\n");
-				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
+				/* printf("To be sent:\n");
+				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
 				bufs[0] = pkt;
+				
+				startdpdk = rte_rdtsc_precise();
 				const uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, 1);
+				indpdk += rte_rdtsc_precise() - startdpdk;
+
 				if (unlikely(nb_tx != 1)) {
-					rte_exit(EXIT_FAILURE, "Error: fail to send initial ping pkt\n");
+					rte_exit(EXIT_FAILURE, "Error: fail to send ping pkt\n");
 				}
 				seq++;
 			}
 			
+			startdpdk = rte_rdtsc_precise();
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
+			indpdk += rte_rdtsc_precise() - startdpdk;
 
 			if (unlikely(nb_rx == 0))
 				continue;
@@ -221,10 +225,10 @@ lcore_main()
 					(icmp_h->icmp_code == 0)) {
 					rec++;
 				}
-				if (rec >= NUM_PING) {
-					uint64_t elapsed_cycles = rte_rdtsc_precise() - begin; 
-					uint64_t microseconds= elapsed_cycles * 1000000 / hz;
-					printf("%d packets transmitted, rtt avg= %ld\n", seq, microseconds / rec);
+				if (rec == NUM_PING) {
+					printf("%d packets transmitted, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
+						seq, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
+					rec++;
 				}
 				rte_pktmbuf_free(bufs[i]);
 			}
