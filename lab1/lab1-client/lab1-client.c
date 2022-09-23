@@ -190,7 +190,7 @@ lcore_main()
 				struct rte_icmp_hdr *icmphdr = rte_pktmbuf_mtod_offset(pkt, struct rte_icmp_hdr *, 
 					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
 				/* Send ping. */
-				/* printf("To be sent:\n");
+				/* printf("To be sent: %d\n", seq);
 				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
 				bufs[0] = pkt;
 				
@@ -226,6 +226,7 @@ lcore_main()
 					rec++;
 				}
 				if (rec == NUM_PING) {
+					/* Record time stats. */
 					printf("%d packets transmitted, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
 						seq, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
 					rec++;

@@ -184,10 +184,11 @@ lcore_main(void)
 					rte_pktmbuf_free(pkt);
 					continue;
 				}
-				/* printf("received:\n");
+				/* printf("received: %d\n", rec);
 				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len); */
 				rec++;
 				if (rec == 1)
+					/* Time when receiving the first echo request. */
 					begin = rte_rdtsc_precise();
 				/* Swap ether addresses. */
 				rte_ether_addr_copy(&eth_h->src_addr, &eth_addr);
@@ -219,6 +220,7 @@ lcore_main(void)
 			}
 
 			if (rec == 500000) {
+				/* Record time stats. */
 				printf("%d packets received, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
 						rec, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
 				rec++;
