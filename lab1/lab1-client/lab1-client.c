@@ -17,7 +17,7 @@
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
-const static uint32_t NUM_PING = 500000;
+const static uint32_t NUM_PING = 10000;
 
 /* Define the mempool globally */
 struct rte_mempool *mbuf_pool = NULL;
@@ -156,6 +156,7 @@ lcore_main()
 	uint64_t hz = rte_get_timer_hz(); 
 	uint64_t begin = rte_rdtsc_precise(); 
 	uint32_t seq = 0;
+	uint32_t rec = 0;
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
@@ -186,9 +187,9 @@ lcore_main()
 				struct rte_icmp_hdr *icmphdr = rte_pktmbuf_mtod_offset(pkt, struct rte_icmp_hdr *, 
 					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
 				/* Increment seq number. */
-				icmphdr->icmp_seq_nb = rte_cpu_to_be_16(seq++);
+				/* icmphdr->icmp_seq_nb = rte_cpu_to_be_16(seq++);
 				icmphdr->icmp_cksum = 0;
-				icmphdr->icmp_cksum = ~rte_raw_cksum(icmphdr, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr));
+				icmphdr->icmp_cksum = ~rte_raw_cksum(icmphdr, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr)); */
 
 				/* Send ping. */
 				printf("To be sent:\n");
@@ -198,6 +199,7 @@ lcore_main()
 				if (unlikely(nb_tx != 1)) {
 					rte_exit(EXIT_FAILURE, "Error: fail to send initial ping pkt\n");
 				}
+				seq++;
 			}
 			
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
@@ -208,11 +210,21 @@ lcore_main()
 			/* Free received packets. */
 			uint8_t i;
 			for (i = 0; i < nb_rx; i++) {
-				if (rte_pktmbuf_mtod_offset(bufs[i], struct rte_icmp_hdr *, 
-					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)))->icmp_seq_nb >= rte_cpu_to_be_16(NUM_PING)) {
-						uint64_t elapsed_cycles = rte_rdtsc_precise() - begin; 
-						uint64_t microseconds= elapsed_cycles * 1000000 / hz;
-						printf("%d packets transmitted, rtt avg= %ld\n", NUM_PING, microseconds / NUM_PING);
+				struct rte_ipv4_hdr *ip_h = rte_pktmbuf_mtod_offset(bufs[i], struct rte_ipv4_hdr *, 
+					sizeof(struct rte_ether_hdr));
+				
+				struct rte_icmp_hdr *icmp_h = rte_pktmbuf_mtod_offset(bufs[i], struct rte_icmp_hdr *, 
+					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
+
+				if ((ip_h->next_proto_id == IPPROTO_ICMP) &&
+					(icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REPLY) &&
+					(icmp_h->icmp_code == 0)) {
+					rec++;
+				}
+				if (rec >= NUM_PING) {
+					uint64_t elapsed_cycles = rte_rdtsc_precise() - begin; 
+					uint64_t microseconds= elapsed_cycles * 1000000 / hz;
+					printf("%d packets transmitted, rtt avg= %ld\n", seq, microseconds / rec);
 				}
 				rte_pktmbuf_free(bufs[i]);
 			}
