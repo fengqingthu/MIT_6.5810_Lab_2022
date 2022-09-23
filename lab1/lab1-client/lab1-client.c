@@ -17,7 +17,10 @@
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
-#define NUM_PING 500000
+const static uint32_t NUM_PING = 500000;
+
+/* Define the mempool globally */
+struct rte_mempool *mbuf_pool = NULL;
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
@@ -110,7 +113,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 /* Construct the hardcoded ping packet. */
 static struct rte_mbuf *
-construct_ping_packet(struct rte_mempool *mbuf_pool)
+construct_ping_packet(void)
 {
 	struct rte_mbuf *icmpbuf  = rte_pktmbuf_alloc(mbuf_pool);
 	if (!icmpbuf) {
@@ -128,7 +131,7 @@ construct_ping_packet(struct rte_mempool *mbuf_pool)
 	icmpbuf->next = NULL;
 	
 	uint8_t *pkt_data = rte_pktmbuf_mtod(icmpbuf, uint8_t *);
-	unsigned char *hardcode[] = 
+	unsigned char hardcode[] = 
 		{0x0C, 0x42, 0xA1, 0x8B, 0x31, 0x60, 0x0C, 0x42, 0xA1, 0x8B, 0x31, 0x20, 0x08, 0x00, 0x45, 0x00,
 		0x00, 0x54, 0x7E, 0xEC, 0x40, 0x00, 0x40, 0x01, 0x26, 0x67, 0xC0, 0xA8, 0x0A, 0x02, 0xC0, 0xA8,
 		0x0A, 0x03, 0x08, 0x00, 0x68, 0x87, 0x00, 0x57, 0x27, 0x10, 0x52, 0xCF, 0x2C, 0x63, 0x00, 0x00,
@@ -136,7 +139,7 @@ construct_ping_packet(struct rte_mempool *mbuf_pool)
 		0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
 		0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
 		0x36, 0x37};
-	rte_memcpy(pkt_data, hardcode, 98);
+	rte_memcpy(pkt_data, &hardcode, 98);
 	return icmpbuf;
 }
 
@@ -175,25 +178,28 @@ lcore_main()
 			/* Get burst of RX packets, from port1 */
 			if (port != 2)
 				continue;
+			
+			struct rte_mbuf *bufs[BURST_SIZE];
+
 			if (seq <= NUM_PING) {
 				struct rte_mbuf *pkt = construct_ping_packet();
 				struct rte_icmp_hdr *icmphdr = rte_pktmbuf_mtod_offset(pkt, struct rte_icmp_hdr *, 
 					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
 				/* Increment seq number. */
 				icmphdr->icmp_seq_nb = rte_cpu_to_be_16(seq++);
-				icmp_h->icmp_cksum = 0;
-				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr));
+				icmphdr->icmp_cksum = 0;
+				icmphdr->icmp_cksum = ~rte_raw_cksum(icmphdr, pkt->pkt_len - sizeof(struct rte_ether_hdr) - sizeof(struct rte_ipv4_hdr));
 
 				/* Send ping. */
 				printf("To be sent:\n");
 				rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
-				const uint16_t nb_tx = rte_eth_tx_burst(port, 0, pkt, 1);
+				bufs[0] = pkt;
+				const uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, 1);
 				if (unlikely(nb_tx != 1)) {
 					rte_exit(EXIT_FAILURE, "Error: fail to send initial ping pkt\n");
 				}
 			}
 			
-			struct rte_mbuf *bufs[BURST_SIZE];
 			const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
 
 			if (unlikely(nb_rx == 0))
@@ -206,8 +212,8 @@ lcore_main()
 					(sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)))->icmp_seq_nb >= rte_cpu_to_be_16(NUM_PING)) {
 						uint64_t elapsed_cycles = rte_rdtsc_precise() - begin; 
 						uint64_t microseconds= elapsed_cycles * 1000000 / hz;
-						printf("%d packets transmitted, rtt avg= %d\n", NUM_PING, microseconds / NUM_PING)
-					};
+						printf("%d packets transmitted, rtt avg= %ld\n", NUM_PING, microseconds / NUM_PING);
+				}
 				rte_pktmbuf_free(bufs[i]);
 			}
 		}
@@ -215,9 +221,6 @@ lcore_main()
 	/* >8 End of loop. */
 }
 /* >8 End Basic forwarding application lcore. */
-
-/* Define the mempool globally */
-struct rte_mempool *mbuf_pool = NULL;
 
 /*
  * The main function, which does initialization and calls the per-lcore
@@ -265,7 +268,6 @@ main(int argc, char *argv[])
 	if (rte_lcore_count() > 1)
 		printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
 
-	uint8_t *pkt_data = rte_pktmbuf_mtod(icmpbuf, uint8_t *);
 	/* Call lcore_main on the main core only. Called on single lcore. 8< */
 	lcore_main();
 	/* >8 End of called on single lcore. */
