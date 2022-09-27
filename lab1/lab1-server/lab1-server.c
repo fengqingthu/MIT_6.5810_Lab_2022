@@ -44,9 +44,10 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	memset(&port_conf, 0, sizeof(struct rte_eth_conf));
 
 	retval = rte_eth_dev_info_get(port, &dev_info);
-	if (retval != 0) {
+	if (retval != 0)
+	{
 		printf("Error during getting device (port %u) info: %s\n",
-				port, strerror(-retval));
+			   port, strerror(-retval));
 		return retval;
 	}
 
@@ -64,9 +65,10 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 
 	/* Allocate and set up 1 RX queue per Ethernet port. */
-	for (q = 0; q < rx_rings; q++) {
+	for (q = 0; q < rx_rings; q++)
+	{
 		retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
-				rte_eth_dev_socket_id(port), NULL, mbuf_pool);
+										rte_eth_dev_socket_id(port), NULL, mbuf_pool);
 		if (retval < 0)
 			return retval;
 	}
@@ -74,9 +76,10 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	txconf = dev_info.default_txconf;
 	txconf.offloads = port_conf.txmode.offloads;
 	/* Allocate and set up 1 TX queue per Ethernet port. */
-	for (q = 0; q < tx_rings; q++) {
+	for (q = 0; q < tx_rings; q++)
+	{
 		retval = rte_eth_tx_queue_setup(port, q, nb_txd,
-				rte_eth_dev_socket_id(port), &txconf);
+										rte_eth_dev_socket_id(port), &txconf);
 		if (retval < 0)
 			return retval;
 	}
@@ -94,8 +97,8 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 		return retval;
 
 	printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
-			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
-			port, RTE_ETHER_ADDR_BYTES(&addr));
+		   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+		   port, RTE_ETHER_ADDR_BYTES(&addr));
 
 	/* Enable RX in promiscuous mode for the Ethernet device. */
 	retval = rte_eth_promiscuous_enable(port);
@@ -112,12 +115,12 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
  * an input port and writing to an output port.
  */
 
- /* Basic forwarding application lcore. 8< */
+/* Basic forwarding application lcore. 8< */
 static __rte_noreturn void
 lcore_main(void)
 {
 	uint16_t port;
-	uint64_t hz = rte_get_timer_hz(); 
+	uint64_t hz = rte_get_timer_hz();
 	uint64_t begin;
 	uint64_t totalus = 0;
 	uint64_t indpdk = 0;
@@ -129,19 +132,22 @@ lcore_main(void)
 	 * for best performance.
 	 */
 	RTE_ETH_FOREACH_DEV(port)
-		if (rte_eth_dev_socket_id(port) >= 0 &&
-				rte_eth_dev_socket_id(port) !=
-						(int)rte_socket_id())
-			printf("WARNING, port %u is on remote NUMA node to "
-					"polling thread.\n\tPerformance will "
-					"not be optimal.\n", port);
+	if (rte_eth_dev_socket_id(port) >= 0 &&
+		rte_eth_dev_socket_id(port) !=
+			(int)rte_socket_id())
+		printf("WARNING, port %u is on remote NUMA node to "
+			   "polling thread.\n\tPerformance will "
+			   "not be optimal.\n",
+			   port);
 
 	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
-			rte_lcore_id());
+		   rte_lcore_id());
 
 	/* Main work of application loop. 8< */
-	for (;;) {
-		RTE_ETH_FOREACH_DEV(port) {
+	for (;;)
+	{
+		RTE_ETH_FOREACH_DEV(port)
+		{
 			/* Get burst of RX packets, from port1 */
 			if (port != 2)
 				continue;
@@ -163,24 +169,26 @@ lcore_main(void)
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			
-			for (i = 0; i < nb_rx; i++) {
+			for (i = 0; i < nb_rx; i++)
+			{
 				pkt = bufs[i];
 
 				eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-				if (eth_h->ether_type != rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4)) {
+				if (eth_h->ether_type != rte_be_to_cpu_16(RTE_ETHER_TYPE_IPV4))
+				{
 					rte_pktmbuf_free(pkt);
 					continue;
 				}
 
-				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, 
-					sizeof(struct rte_ether_hdr));
-				
+				ip_h = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *,
+											   sizeof(struct rte_ether_hdr));
+
 				icmp_h = (struct rte_icmp_hdr *)(ip_h + 1);
 
-				if (! ((ip_h->next_proto_id == IPPROTO_ICMP) &&
-					(icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) &&
-					(icmp_h->icmp_code == 0))) {
+				if (!((ip_h->next_proto_id == IPPROTO_ICMP) &&
+					  (icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REQUEST) &&
+					  (icmp_h->icmp_code == 0)))
+				{
 					rte_pktmbuf_free(pkt);
 					continue;
 				}
@@ -201,7 +209,7 @@ lcore_main(void)
 				ip_h->dst_addr = ip_addr;
 				ip_h->hdr_checksum = 0;
 				ip_h->hdr_checksum = rte_ipv4_cksum(ip_h);
-				
+
 				icmp_h->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
 				icmp_h->icmp_cksum = 0;
 				icmp_h->icmp_cksum = ~rte_raw_cksum(icmp_h, pkt->pkt_len - sizeof(eth_h) - sizeof(ip_h));
@@ -213,25 +221,28 @@ lcore_main(void)
 
 			/* Send back echo replies. */
 			uint16_t nb_tx = 0;
-			if (nb_replies > 0) {
+			if (nb_replies > 0)
+			{
 				startdpdk = rte_rdtsc_precise();
 				nb_tx = rte_eth_tx_burst(port, 0, bufs, nb_replies);
 				indpdk += rte_rdtsc_precise() - startdpdk;
 			}
 
-			if (rec == 500000) {
+			if (rec == 500000)
+			{
 				/* Record time stats. */
 				printf("%d packets received, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
-						rec, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
+					   rec, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
 				rec++;
 			}
 
 			/* Free any unsent packets. */
-			if (unlikely(nb_tx < nb_rx)) {
+			if (unlikely(nb_tx < nb_rx))
+			{
 				uint16_t buf;
 				for (buf = nb_tx; buf < nb_rx; buf++)
 					rte_pktmbuf_free(bufs[buf]);
-			}	
+			}
 		}
 	}
 	/* >8 End of loop. */
@@ -242,8 +253,7 @@ lcore_main(void)
  * The main function, which does initialization and calls the per-lcore
  * functions.
  */
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
 	struct rte_mempool *mbuf_pool;
 	unsigned nb_ports;
@@ -267,7 +277,7 @@ main(int argc, char *argv[])
 
 	/* Allocates mempool to hold the mbufs. 8< */
 	mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS * nb_ports,
-		MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+										MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
 	/* >8 End of allocating mempool to hold mbuf. */
 
 	if (mbuf_pool == NULL)
@@ -275,9 +285,9 @@ main(int argc, char *argv[])
 
 	/* Initializing all ports. 8< */
 	RTE_ETH_FOREACH_DEV(portid)
-		if (portid == 2 && port_init(portid, mbuf_pool) != 0)
-			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
-					portid);
+	if (portid == 2 && port_init(portid, mbuf_pool) != 0)
+		rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu16 "\n",
+				 portid);
 	/* >8 End of initializing all ports. */
 
 	if (rte_lcore_count() > 1)
