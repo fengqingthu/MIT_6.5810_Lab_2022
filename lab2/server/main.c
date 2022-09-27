@@ -88,15 +88,16 @@ static void send_resp_to_client(struct req_context *ctx)
                 printf("error %d\n", ctx->rc);
         }
         if (ctx->op == READ)
-                printf("read seq %ld: %s\n", ctx->lba, ctx->resp_data);
+                printf("read seq=%ld: %s\n", ctx->lba, ctx->resp_data);
         else
-                printf("write seq %ld: %s\n", ctx->lba, ctx->req_data);
+                printf("write seq=%ld: %s\n", ctx->lba, ctx->req_data);
+        /* Free ctx if DPDK does not free it. */
 }
 
 /* The callback function for handling read requests. */
 static void read_complete(void *args, const struct spdk_nvme_cpl *completion)
 {
-        struct callback_args *cb_args = args;
+        struct callback_args *cb_args = (struct callback_args *) args;
 
         /* Check if there's an error for the read request. */
         if (spdk_nvme_cpl_is_error(completion)) {
@@ -144,7 +145,11 @@ static void write_complete(void *args, const struct spdk_nvme_cpl *completion)
 static struct req_context *recv_req_from_client()
 {
         /* PUT YOUR CODE HERE */
+        if (idx > 1)
+                return NULL;
         struct req_context *ctx = malloc(sizeof(struct req_context));
+        if (!ctx)
+                return NULL;
         ctx->lba = lba_pool[idx];
         ctx->op = op_pool[idx];
         ctx->req_data = req_data_pool[idx++];
@@ -164,14 +169,15 @@ static void spdk_process_completions()
  */
 static void handle_read_req(struct req_context *ctx)
 {
-        struct callback_args cb_args;
-
+        struct callback_args *cb_args = malloc(sizeof(struct callback_args));
+        cb_args->ctx = ctx;
+        
         /* Get the sector size. */
         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
         /* Allocate a DMA-safe host memory buffer. */
-        cb_args.buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
+        cb_args->buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
                                    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-        if (!cb_args.buf)
+        if (!cb_args->buf)
         {
                 fprintf(stderr, "Failed to allocate buffer\n");
                 return;
@@ -180,11 +186,11 @@ static void handle_read_req(struct req_context *ctx)
         /* Now submit a cmd to read data from the 1st sector. */
         int rc = spdk_nvme_ns_cmd_read(
             selected_ns, qpair,
-            cb_args.buf,   /* The buffer to store the read data */
+            cb_args->buf,   /* The buffer to store the read data */
             ctx->lba,      /* Starting LBA to read the data */
             1,             /* Length in sectors */
             read_complete, /* Callback to invoke when the read is done. */
-            &cb_args,      /* Argument to pass to the callback. */
+            cb_args,      /* Argument to pass to the callback. */
             0);
         if (rc != 0)
         {
@@ -199,30 +205,31 @@ static void handle_read_req(struct req_context *ctx)
  */
 static void handle_write_req(struct req_context *ctx)
 {
-        struct callback_args cb_args;
+        struct callback_args *cb_args = malloc(sizeof(struct callback_args));
+        cb_args->ctx = ctx;
 
         /* Get the sector size. */
         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
         /* Allocate a DMA-safe host memory buffer. */
-        cb_args.buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
+        cb_args->buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
                                    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-        if (!cb_args.buf)
+        if (!cb_args->buf)
         {
                 fprintf(stderr, "Failed to allocate buffer\n");
                 return;
         }
 
         /* Write the data into the buffer.  */
-        snprintf(cb_args.buf, sector_sz, "%s", ctx->req_data);
+        snprintf(cb_args->buf, sector_sz, "%s", ctx->req_data);
 
         /* Submit a cmd to write data into the 1st sector. */
         int rc = spdk_nvme_ns_cmd_write(
             selected_ns, qpair,
-            cb_args.buf,    /* The data to write */
+            cb_args->buf,    /* The data to write */
             ctx->lba,       /* Starting LBA to write the data */
             1,              /* Length in sectors */
             write_complete, /* Callback to invoke when the write is done. */
-            &cb_args,       /* Argument to pass to the callback. */
+            cb_args,       /* Argument to pass to the callback. */
             0);
         if (rc != 0)
         {
