@@ -52,12 +52,13 @@
 
 #define NUM_MBUFS 8191
 #define MBUF_CACHE_SIZE 250
-#define BURST_SIZE 32
+#define BURST_SIZE 8
 
 static const uint16_t PORTID = 2U;
 
 /* ASSUMING THERE IS ONLY ONE SENDER. */
-static struct rte_ether_addr client_addr;
+struct rte_ether_addr client_addr = {{0,0,0,0,0,0}};
+struct rte_ether_addr server_addr = {{0,0,0,0,0,0}};
 
 /* The storage request is either reading a sector or writing a sector. */
 enum opcode
@@ -174,6 +175,8 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         if (retval != 0)
                 return retval;
 
+        server_addr = addr;
+
         printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
                " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
                port, RTE_ETHER_ADDR_BYTES(&addr));
@@ -195,84 +198,121 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
  */
 static void send_resp_to_client(struct req_context *ctx)
 {
-        struct rte_mbuf *bufs[BURST_SIZE];
-        struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
-        if (!pkt)
-	{
-                free(ctx->req_data);
-                free(ctx->resp_data);
-                free(ctx);
-                return;
-	}
-        bufs[0] = pkt;
+        // struct rte_mbuf *bufs[BURST_SIZE];
+        // struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
+        // if (!pkt)
+	// {
+        //         printf("Allocation Error\n");
+        //         free(ctx->req_data);
+        //         free(ctx->resp_data);
+        //         free(ctx);
+        //         return;
+	// }
+        // bufs[0] = pkt;
 
-        /* Construct response pkt. */
+        // /* Construct response pkt. */
+        // struct rte_ether_hdr *eth_h;
+        // eth_h->ether_type = RTE_ETHER_TYPE_TEB; // Not sure which frame type
+        // eth_h->src_addr = server_addr;
+        // eth_h->dst_addr = client_addr;
+        
+        // uint8_t *pkt_data = rte_pktmbuf_mtod_offset(pkt, uint8_t *, sizeof(struct rte_ether_hdr));
+        // rte_memcpy(pkt_data, &ctx->rc, sizeof(int));
+        // pkt_data += sizeof(int);
 
+        // pkt->data_len = sizeof(int);
+        // pkt->nb_segs = 1;
 
-        uint16_t nb_tx = 0;
-        while (nb_tx != 1) {
-                nb_tx = rte_eth_tx_burst(PORTID, 0, bufs, 1);
-        }
-        free(ctx->req_data);
-        free(ctx->resp_data);
-        free(ctx);
-        /* Strawman mock code. */
-        // if (ctx->rc != 0)
-        // {
-        //         printf("error %d\n", ctx->rc);
+        // if (ctx->resp_data) {
+        //         /* Get the sector size. */
+        //         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
+        //         snprintf(cb_args.buf, sector_sz, "%s", ctx->resp_data);
+        //         pkt->data_len += sector_sz;
+        //         // rte_memcpy(pkt_data, ctx->resp_data, sector_sz);
         // }
-        // if (ctx->op == READ)
-        //         printf("read seq=%ld: %s\n", ctx->lba, ctx->resp_data);
-        // else
-        //         printf("write seq=%ld: %s\n", ctx->lba, ctx->req_data);
+        
+
+        // uint16_t nb_tx = 0;
+        // while (nb_tx != 1) {
+        //         nb_tx = rte_eth_tx_burst(PORTID, 0, bufs, 1);
+        // }
+        // free(ctx->req_data);
+        // free(ctx->resp_data);
+        // free(ctx);
+        /* Strawman mock code. */
+        if (ctx->rc != 0)
+        {
+                printf("error %d\n", ctx->rc);
+        }
+        if (ctx->op == READ)
+                printf("read lba=%ld: %s\n", ctx->lba, ctx->resp_data);
+        else
+                printf("write lba=%ld: %s\n", ctx->lba, ctx->req_data);
+
+        free(ctx->req_data);
+        /* No need to free resp_data as it is pointing to the buf. */
+        // free(ctx->resp_data);
+        free(ctx);
 }
 
 /*
  * Takes in a buffer of BURST_SIZE, return the number of requests received.
  *
  */
-static uint16_t recv_req_from_client(struct req_context *ctxs)
+static uint16_t recv_req_from_client(struct req_context **ctxs)
 {
         struct rte_mbuf *bufs[BURST_SIZE];
         struct rte_mbuf *pkt;
 
         /* Retrieve burst RX packets. */
         const uint16_t nb_rx = rte_eth_rx_burst(PORTID, 0, bufs, BURST_SIZE);
-
+        
+        int nb_req = 0;
         if (nb_rx > 0) {
+                printf("nb_rx= %d\n", nb_rx);
                 for (int i = 0; i < nb_rx; i++)
                 {
                         pkt = bufs[i];
-                        ctxs[i] = malloc(sizeof(struct req_context));
-                        if (ctxs[i] == NULL)
-                                continue;
+                        printf("receive raw pkt:\n");
+                        rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
 
                         struct rte_ether_hdr *eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
                         /* Update client address. */
                         rte_ether_addr_copy(&eth_h->src_addr, &client_addr);
+                        if (eth_h->ether_type != RTE_ETHER_TYPE_TEB) {
+                                printf("not teb frame, drop pkt\n");
+                                continue;
+                        }
+                        struct req_context *ctx = malloc(sizeof(struct req_context));
+                        if (!ctx) {
+                                printf("ctx malloc failure\n");
+                                continue;
+                        }
                         /* Parse request pkt and copy into ctx. */
                         enum opcode *op = rte_pktmbuf_mtod_offset(pkt, enum opcode *, sizeof(struct rte_ether_hdr));
-                        ctxs[i].op = *op;
+                        ctx->op = *op;
                         uint64_t *lba = rte_pktmbuf_mtod_offset(pkt, uint64_t *, sizeof(struct rte_ether_hdr) + sizeof(enum opcode));
-                        ctxs[i].lba = *lba;
+                        ctx->lba = *lba;
                         uint16_t data_len = pkt->data_len - sizeof(struct rte_ether_hdr) - sizeof(enum opcode) - sizeof(uint64_t);
                         if (*op == WRITE && data_len > 0) {
                                 /* Load req_data */
                                 uint8_t *data = (uint8_t *) (lba + 1);
-                                ctxs[i].req_data = malloc(data_len);
-                                if (ctxs[i].req_data == NULL) {
-                                        ctxs[i] = NULL;
+                                ctx->req_data = malloc(data_len);
+                                if (ctx->req_data == NULL) {
+                                        printf("ctx.req_data malloc failure, drop pkt\n");
                                         continue;
                                 }
-                                memcpy(ctxs[i].req_data, data, data_len);
+                                rte_memcpy(ctx->req_data, data, data_len);
                         } else {
-                                ctxs[i].req_data = NULL;
+                                ctx->req_data = NULL;
                         }
-                        ctxs[i].rc = 0;
-                        ctxs[i].resp_data = NULL;
+                        ctx->rc = 0;
+                        ctx->resp_data = NULL;
+                        printf("parse ctx: op=%d, lba=%ld, req_data=%s\n", ctx->op, ctx->lba, ctx->req_data);
+                        ctxs[nb_req++] = ctx;
                 }
         }
-        return nb_rx;
+        return nb_req;
 
         /* Strawman mock code. */
         // if (idx > 1)
@@ -305,7 +345,9 @@ static void read_complete(void *args, const struct spdk_nvme_cpl *completion)
         cb_args->ctx->resp_data = cb_args->buf;
         cb_args->ctx->rc = 0;
         send_resp_to_client(cb_args->ctx);
-
+        
+        /* Free the resp_data here. */
+        spdk_free(cb_args->buf);
         free(cb_args);
 }
 
@@ -327,6 +369,8 @@ static void write_complete(void *args, const struct spdk_nvme_cpl *completion)
 
         cb_args->ctx->rc = 0;
         send_resp_to_client(cb_args->ctx);
+        
+        spdk_free(cb_args->buf);
         free(cb_args);
 }
 
@@ -370,6 +414,7 @@ static void handle_read_req(struct req_context *ctx)
         {
                 fprintf(stderr, "Failed to submit read cmd\n");
                 ctx->rc = rc;
+                spdk_free(cb_args->buf);
                 send_resp_to_client(ctx);
         }
 }
@@ -384,6 +429,7 @@ static void handle_write_req(struct req_context *ctx)
 
         /* Get the sector size. */
         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
+
         /* Allocate a DMA-safe host memory buffer. */
         cb_args->buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
                                     SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
@@ -409,6 +455,7 @@ static void handle_write_req(struct req_context *ctx)
         {
                 fprintf(stderr, "Failed to submit write cmd\n");
                 ctx->rc = rc;
+                spdk_free(cb_args->buf);
                 send_resp_to_client(ctx);
         }
 }
@@ -416,7 +463,7 @@ static void handle_write_req(struct req_context *ctx)
 /*
  * The main application logic. With only one worker.
  */
-static __rte_noreturn void main_loop(void)
+static void main_loop(void)
 {
         uint16_t port;
         /*
@@ -586,8 +633,8 @@ int main(int argc, char **argv)
         unsigned nb_ports;
         uint16_t portid;
 
-        argc -= ret;
-        argv += ret;
+        // argc -= ret;
+        // argv += ret;
 
         /* Check that there is an even number of ports to send/receive on. */
         nb_ports = rte_eth_dev_count_avail();
