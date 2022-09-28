@@ -18,9 +18,13 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
-static const uint16_t PORTID = 2U;
+static const bool DEBUG = true;
 
-struct rte_ether_addr client_addr = {{0,0,0,0,0,0}};
+static const uint16_t PORTID = 2U;
+static const uint16_t NUM_REQ = 10;
+static const uint16_t THROUGHPUT = 100;
+
+struct rte_ether_addr client_addr = {{0, 0, 0, 0, 0, 0}};
 struct rte_ether_addr server_addr = {{0x0c, 0x42, 0xa1, 0x8c, 0xdc, 0x24}};
 const uint64_t sector_sz = 512;
 
@@ -123,14 +127,14 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 
 /* Construct the hardcoded ping packet. */
 static struct rte_mbuf *
-construct_ping_packet(void)
+construct_write_packet(void)
 {
         struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
         if (!pkt)
-	{
-                printf("Allocation Error\n");
+        {
+                printf("pkt allocation error\n");
                 return NULL;
-	}
+        }
 
         void *pkt_h = rte_pktmbuf_mtod_offset(pkt, void *, 0);
 
@@ -206,14 +210,18 @@ lcore_main()
                                 continue;
 
                         struct rte_mbuf *bufs[BURST_SIZE];
+                        struct rte_mbuf *pkt;
 
-                        if (seq < 10)
+                        if (seq < NUM_REQ)
                         {
-                                struct rte_mbuf *pkt = construct_ping_packet();
+                                pkt = construct_write_packet();
 
-                                /* Send ping. */
-                                printf("To be sent: %d\n", seq);
-                                rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
+                                if (DEBUG)
+                                {
+                                        printf("To be sent: %d\n", seq);
+                                        rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
+                                }
+
                                 bufs[0] = pkt;
 
                                 startdpdk = rte_rdtsc_precise();
@@ -222,7 +230,7 @@ lcore_main()
 
                                 if (unlikely(nb_tx != 1))
                                 {
-                                        rte_exit(EXIT_FAILURE, "Error: fail to send ping pkt\n");
+                                        printf("req pkt transsmission failure\n");
                                 }
                                 seq++;
                         }
@@ -238,25 +246,52 @@ lcore_main()
                         uint8_t i;
                         for (i = 0; i < nb_rx; i++)
                         {
-                                // struct rte_ipv4_hdr *ip_h = rte_pktmbuf_mtod_offset(bufs[i], struct rte_ipv4_hdr *,
-                                //                                                     sizeof(struct rte_ether_hdr));
+                                if (DEBUG)
+                                {
+                                        printf("Received: %d\n", rec);
+                                        rte_pktmbuf_dump(stdout, bufs[i], bufs[i]->buf_len);
+                                }
 
-                                // struct rte_icmp_hdr *icmp_h = rte_pktmbuf_mtod_offset(bufs[i], struct rte_icmp_hdr *,
-                                //                                                       (sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr)));
+                                struct rte_ether_hdr *eth_h = rte_pktmbuf_mtod(bufs[i], struct rte_ether_hdr *);
+                                if (eth_h->ether_type != RTE_ETHER_TYPE_TEB)
+                                {
+                                        if (DEBUG)
+                                        {
+                                                printf("not teb frame, drop pkt\n");
+                                        }
+                                        rte_pktmbuf_free(bufs[i]);
+                                        continue;
+                                }
+                                
+                                rec++;
+                                int *rc = rte_pktmbuf_mtod_offset(bufs[i], int *, sizeof(struct rte_ether_hdr));
+                                if (*rc != 0)
+                                {
+                                        printf("received error resp, rc= %d\n", *rc);
+                                        rte_pktmbuf_free(bufs[i]);
+                                        continue;
+                                }
+                                if (DEBUG)
+                                {
+                                        printf("req processed successfully\n");
+                                }
+                                uint16_t data_len = pkt->data_len - sizeof(struct rte_ether_hdr) - sizeof(int);
+                                if (data_len > 0)
+                                {
+                                        uint8_t *res_data = rte_pktmbuf_mtod_offset(bufs[i], uint8_t *, sizeof(struct rte_ether_hdr) + sizeof(int));
+                                        if (DEBUG)
+                                        {
+                                                printf("received resp_data= %s\n", res_data);
+                                        }
+                                }
 
-                                // if ((ip_h->next_proto_id == IPPROTO_ICMP) &&
-                                //     (icmp_h->icmp_type == RTE_IP_ICMP_ECHO_REPLY) &&
-                                //     (icmp_h->icmp_code == 0))
-                                // {
-                                //         rec++;
-                                // }
-                                // if (rec == NUM_PING)
-                                // {
-                                //         /* Record time stats. */
-                                //         printf("%d packets transmitted, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
-                                //                seq, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
-                                //         rec++;
-                                // }
+                                if (rec == NUM_REQ)
+                                {
+                                        /* Record time stats. */
+                                        // printf("%d packets transmitted, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
+                                        //        seq, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
+                                        rec++;
+                                }
                                 rte_pktmbuf_free(bufs[i]);
                         }
                 }
