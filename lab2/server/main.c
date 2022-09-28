@@ -31,12 +31,33 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <stdint.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <rte_eal.h>
+#include <rte_ethdev.h>
+#include <rte_cycles.h>
+#include <rte_lcore.h>
+#include <rte_mbuf.h>
+
 #include <spdk/env.h>
 #include <spdk/log.h>
 #include <spdk/nvme.h>
 #include <spdk/stdinc.h>
 #include <spdk/string.h>
 #include <spdk/vmd.h>
+
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 1024
+
+#define NUM_MBUFS 8191
+#define MBUF_CACHE_SIZE 250
+#define BURST_SIZE 32
+
+static const uint16_t PORTID = 2U;
+
+/* ASSUMING THERE IS ONLY ONE SENDER. */
+static struct rte_ether_addr client_addr;
 
 /* The storage request is either reading a sector or writing a sector. */
 enum opcode
@@ -61,6 +82,8 @@ static struct spdk_nvme_ctrlr *selected_ctrlr;
 static struct spdk_nvme_ns *selected_ns;
 /* Global qpair. Cannot support parallel access, will need to be thread-specific. */
 static struct spdk_nvme_qpair *qpair;
+/* Define the mempool globally */
+struct rte_mempool *mbuf_pool = NULL;
 
 /* For mock testing. */
 int idx = 0;
@@ -76,6 +99,95 @@ struct callback_args
 };
 
 /*
+ * Initializes a given port using global settings and with the RX buffers
+ * coming from the mbuf_pool passed as a parameter.
+ */
+
+/* Main functional part of port initialization. 8< */
+static inline int
+port_init(uint16_t port, struct rte_mempool *mbuf_pool)
+{
+        struct rte_eth_conf port_conf;
+        const uint16_t rx_rings = 1, tx_rings = 1;
+        uint16_t nb_rxd = RX_RING_SIZE;
+        uint16_t nb_txd = TX_RING_SIZE;
+        int retval;
+        uint16_t q;
+        struct rte_eth_dev_info dev_info;
+        struct rte_eth_txconf txconf;
+
+        if (!rte_eth_dev_is_valid_port(port))
+                return -1;
+
+        memset(&port_conf, 0, sizeof(struct rte_eth_conf));
+
+        retval = rte_eth_dev_info_get(port, &dev_info);
+        if (retval != 0)
+        {
+                printf("Error during getting device (port %u) info: %s\n",
+                       port, strerror(-retval));
+                return retval;
+        }
+
+        if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
+                port_conf.txmode.offloads |=
+                    RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+
+        /* Configure the Ethernet device. */
+        retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
+        if (retval != 0)
+                return retval;
+
+        retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
+        if (retval != 0)
+                return retval;
+
+        /* Allocate and set up 1 RX queue per Ethernet port. */
+        for (q = 0; q < rx_rings; q++)
+        {
+                retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
+                                                rte_eth_dev_socket_id(port), NULL, mbuf_pool);
+                if (retval < 0)
+                        return retval;
+        }
+
+        txconf = dev_info.default_txconf;
+        txconf.offloads = port_conf.txmode.offloads;
+        /* Allocate and set up 1 TX queue per Ethernet port. */
+        for (q = 0; q < tx_rings; q++)
+        {
+                retval = rte_eth_tx_queue_setup(port, q, nb_txd,
+                                                rte_eth_dev_socket_id(port), &txconf);
+                if (retval < 0)
+                        return retval;
+        }
+
+        /* Starting Ethernet port. 8< */
+        retval = rte_eth_dev_start(port);
+        /* >8 End of starting of ethernet port. */
+        if (retval < 0)
+                return retval;
+
+        /* Display the port MAC address. */
+        struct rte_ether_addr addr;
+        retval = rte_eth_macaddr_get(port, &addr);
+        if (retval != 0)
+                return retval;
+
+        printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+               " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n",
+               port, RTE_ETHER_ADDR_BYTES(&addr));
+
+        /* Enable RX in promiscuous mode for the Ethernet device. */
+        retval = rte_eth_promiscuous_enable(port);
+        /* End of setting RX port in promiscuous mode. */
+        if (retval != 0)
+                return retval;
+
+        return 0;
+}
+
+/*
  * Send the response back to the client using DPDK.
  *
  * This function should be invoked by SPDK's callback functions.
@@ -83,24 +195,105 @@ struct callback_args
  */
 static void send_resp_to_client(struct req_context *ctx)
 {
-        /* PUT YOUR CODE HERE */
-        if (ctx->rc != 0) {
-                printf("error %d\n", ctx->rc);
+        struct rte_mbuf *bufs[BURST_SIZE];
+        struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
+        if (!pkt)
+	{
+                free(ctx->req_data);
+                free(ctx->resp_data);
+                free(ctx);
+                return;
+	}
+        bufs[0] = pkt;
+
+        /* Construct response pkt. */
+
+
+        uint16_t nb_tx = 0;
+        while (nb_tx != 1) {
+                nb_tx = rte_eth_tx_burst(PORTID, 0, bufs, 1);
         }
-        if (ctx->op == READ)
-                printf("read seq=%ld: %s\n", ctx->lba, ctx->resp_data);
-        else
-                printf("write seq=%ld: %s\n", ctx->lba, ctx->req_data);
-        /* Free ctx if DPDK does not free it. */
+        free(ctx->req_data);
+        free(ctx->resp_data);
+        free(ctx);
+        /* Strawman mock code. */
+        // if (ctx->rc != 0)
+        // {
+        //         printf("error %d\n", ctx->rc);
+        // }
+        // if (ctx->op == READ)
+        //         printf("read seq=%ld: %s\n", ctx->lba, ctx->resp_data);
+        // else
+        //         printf("write seq=%ld: %s\n", ctx->lba, ctx->req_data);
+}
+
+/*
+ * Takes in a buffer of BURST_SIZE, return the number of requests received.
+ *
+ */
+static uint16_t recv_req_from_client(struct req_context *ctxs)
+{
+        struct rte_mbuf *bufs[BURST_SIZE];
+        struct rte_mbuf *pkt;
+
+        /* Retrieve burst RX packets. */
+        const uint16_t nb_rx = rte_eth_rx_burst(PORTID, 0, bufs, BURST_SIZE);
+
+        if (nb_rx > 0) {
+                for (int i = 0; i < nb_rx; i++)
+                {
+                        pkt = bufs[i];
+                        ctxs[i] = malloc(sizeof(struct req_context));
+                        if (ctxs[i] == NULL)
+                                continue;
+
+                        struct rte_ether_hdr *eth_h = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+                        /* Update client address. */
+                        rte_ether_addr_copy(&eth_h->src_addr, &client_addr);
+                        /* Parse request pkt and copy into ctx. */
+                        enum opcode *op = rte_pktmbuf_mtod_offset(pkt, enum opcode *, sizeof(struct rte_ether_hdr));
+                        ctxs[i].op = *op;
+                        uint64_t *lba = rte_pktmbuf_mtod_offset(pkt, uint64_t *, sizeof(struct rte_ether_hdr) + sizeof(enum opcode));
+                        ctxs[i].lba = *lba;
+                        uint16_t data_len = pkt->data_len - sizeof(struct rte_ether_hdr) - sizeof(enum opcode) - sizeof(uint64_t);
+                        if (*op == WRITE && data_len > 0) {
+                                /* Load req_data */
+                                uint8_t *data = (uint8_t *) (lba + 1);
+                                ctxs[i].req_data = malloc(data_len);
+                                if (ctxs[i].req_data == NULL) {
+                                        ctxs[i] = NULL;
+                                        continue;
+                                }
+                                memcpy(ctxs[i].req_data, data, data_len);
+                        } else {
+                                ctxs[i].req_data = NULL;
+                        }
+                        ctxs[i].rc = 0;
+                        ctxs[i].resp_data = NULL;
+                }
+        }
+        return nb_rx;
+
+        /* Strawman mock code. */
+        // if (idx > 1)
+        //         return NULL;
+        // struct req_context *ctx = malloc(sizeof(struct req_context));
+        // if (!ctx)
+        //         return NULL;
+        // ctx->lba = lba_pool[idx];
+        // ctx->op = op_pool[idx];
+        // ctx->req_data = req_data_pool[idx++];
+        // return ctx;
 }
 
 /* The callback function for handling read requests. */
 static void read_complete(void *args, const struct spdk_nvme_cpl *completion)
 {
-        struct callback_args *cb_args = (struct callback_args *) args;
+        struct callback_args *cb_args = args;
 
         /* Check if there's an error for the read request. */
-        if (spdk_nvme_cpl_is_error(completion)) {
+        if (spdk_nvme_cpl_is_error(completion))
+        {
                 spdk_nvme_qpair_print_completion(
                     qpair, (struct spdk_nvme_cpl *)completion);
                 fprintf(stderr, "I/O error status: %s\n",
@@ -112,6 +305,8 @@ static void read_complete(void *args, const struct spdk_nvme_cpl *completion)
         cb_args->ctx->resp_data = cb_args->buf;
         cb_args->ctx->rc = 0;
         send_resp_to_client(cb_args->ctx);
+
+        free(cb_args);
 }
 
 /* The callback function for handling write requests. */
@@ -120,7 +315,8 @@ static void write_complete(void *args, const struct spdk_nvme_cpl *completion)
         struct callback_args *cb_args = args;
 
         /* Check if there's an error for the write request. */
-        if (spdk_nvme_cpl_is_error(completion)) {
+        if (spdk_nvme_cpl_is_error(completion))
+        {
                 spdk_nvme_qpair_print_completion(
                     qpair, (struct spdk_nvme_cpl *)completion);
                 fprintf(stderr, "I/O error status: %s\n",
@@ -129,31 +325,9 @@ static void write_complete(void *args, const struct spdk_nvme_cpl *completion)
                 exit(1);
         }
 
-        /* Free the buffer and req_data here?
-        - No need, as buffer is on stack and
-        req_data will be freed when sent back by DPDK. */
-        spdk_free(cb_args->buf); // Should be harmless to free buf early
         cb_args->ctx->rc = 0;
         send_resp_to_client(cb_args->ctx);
-}
-
-/*
- * Try to receive a storage request from the client using DPDK.
- *
- * For the first step, use a mock implementation here to test main_loop().
- */
-static struct req_context *recv_req_from_client()
-{
-        /* PUT YOUR CODE HERE */
-        if (idx > 1)
-                return NULL;
-        struct req_context *ctx = malloc(sizeof(struct req_context));
-        if (!ctx)
-                return NULL;
-        ctx->lba = lba_pool[idx];
-        ctx->op = op_pool[idx];
-        ctx->req_data = req_data_pool[idx++];
-        return ctx;
+        free(cb_args);
 }
 
 /*
@@ -171,12 +345,12 @@ static void handle_read_req(struct req_context *ctx)
 {
         struct callback_args *cb_args = malloc(sizeof(struct callback_args));
         cb_args->ctx = ctx;
-        
+
         /* Get the sector size. */
         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
         /* Allocate a DMA-safe host memory buffer. */
         cb_args->buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
-                                   SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+                                    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
         if (!cb_args->buf)
         {
                 fprintf(stderr, "Failed to allocate buffer\n");
@@ -186,11 +360,11 @@ static void handle_read_req(struct req_context *ctx)
         /* Now submit a cmd to read data from the 1st sector. */
         int rc = spdk_nvme_ns_cmd_read(
             selected_ns, qpair,
-            cb_args->buf,   /* The buffer to store the read data */
+            cb_args->buf,  /* The buffer to store the read data */
             ctx->lba,      /* Starting LBA to read the data */
             1,             /* Length in sectors */
             read_complete, /* Callback to invoke when the read is done. */
-            cb_args,      /* Argument to pass to the callback. */
+            cb_args,       /* Argument to pass to the callback. */
             0);
         if (rc != 0)
         {
@@ -212,7 +386,7 @@ static void handle_write_req(struct req_context *ctx)
         int sector_sz = spdk_nvme_ns_get_sector_size(selected_ns);
         /* Allocate a DMA-safe host memory buffer. */
         cb_args->buf = spdk_zmalloc(sector_sz, sector_sz, NULL,
-                                   SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+                                    SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
         if (!cb_args->buf)
         {
                 fprintf(stderr, "Failed to allocate buffer\n");
@@ -225,11 +399,11 @@ static void handle_write_req(struct req_context *ctx)
         /* Submit a cmd to write data into the 1st sector. */
         int rc = spdk_nvme_ns_cmd_write(
             selected_ns, qpair,
-            cb_args->buf,    /* The data to write */
+            cb_args->buf,   /* The data to write */
             ctx->lba,       /* Starting LBA to write the data */
             1,              /* Length in sectors */
             write_complete, /* Callback to invoke when the write is done. */
-            cb_args,       /* Argument to pass to the callback. */
+            cb_args,        /* Argument to pass to the callback. */
             0);
         if (rc != 0)
         {
@@ -242,12 +416,24 @@ static void handle_write_req(struct req_context *ctx)
 /*
  * The main application logic. With only one worker.
  */
-static void main_loop(void)
+static __rte_noreturn void main_loop(void)
 {
-        struct req_context *ctx;
+        uint16_t port;
+        /*
+         * Check that the port is on the same NUMA node as the polling thread
+         * for best performance.
+         */
+        RTE_ETH_FOREACH_DEV(port)
+        if (rte_eth_dev_socket_id(port) >= 0 &&
+            rte_eth_dev_socket_id(port) !=
+                (int)rte_socket_id())
+                printf("WARNING, port %u is on remote NUMA node to "
+                       "polling thread.\n\tPerformance will "
+                       "not be optimal.\n",
+                       port);
 
-        int rc;
-        int sector_sz;
+        printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
+               rte_lcore_id());
 
         /* Setup the SPDK queue pair (submission queue and completion queue). */
         qpair = spdk_nvme_ctrlr_alloc_io_qpair(selected_ctrlr, NULL, 0);
@@ -260,19 +446,31 @@ static void main_loop(void)
         /* The main event loop. */
         while (1)
         {
-                ctx = recv_req_from_client();
-                if (ctx)
+                RTE_ETH_FOREACH_DEV(port)
                 {
-                        if (ctx->op == READ)
+                        if (port != PORTID)
+                                continue;
+
+                        struct req_context *ctxs[BURST_SIZE];
+                        struct req_context *ctx;
+
+                        uint16_t nb_req = recv_req_from_client(ctxs);
+                        if (nb_req > 0)
                         {
-                                handle_read_req(ctx);
+                                for (int i = 0; i < nb_req; i++) {
+                                        ctx = ctxs[i];
+                                        if (ctx->op == READ)
+                                        {
+                                                handle_read_req(ctx);
+                                        }
+                                        else
+                                        {
+                                                handle_write_req(ctx);
+                                        }
+                                }
                         }
-                        else
-                        {
-                                handle_write_req(ctx);
-                        }
+                        spdk_process_completions();
                 }
-                spdk_process_completions();
         }
 
         /* Should never reach here though. */
@@ -384,15 +582,48 @@ int main(int argc, char **argv)
 
         printf("SPDK initialization completes.\n");
 
-        /* PUT YOUR CODE HERE (DPDK initialization) */
+        /* DPDK initialization. */
+        unsigned nb_ports;
+        uint16_t portid;
 
+        argc -= ret;
+        argv += ret;
+
+        /* Check that there is an even number of ports to send/receive on. */
+        nb_ports = rte_eth_dev_count_avail();
+        if (nb_ports < 2 || (nb_ports & 1))
+                rte_exit(EXIT_FAILURE, "Error: number of ports must be even\n");
+
+        /* Creates a new mempool in memory to hold the mbufs. */
+
+        /* Allocates mempool to hold the mbufs. 8< */
+        mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS * nb_ports,
+                                            MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+        /* >8 End of allocating mempool to hold mbuf. */
+
+        if (mbuf_pool == NULL)
+                rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
+
+        /* Initializing all ports. 8< */
+        RTE_ETH_FOREACH_DEV(portid)
+        if (portid == PORTID && port_init(portid, mbuf_pool) != 0)
+                rte_exit(EXIT_FAILURE, "Cannot init port %" PRIu16 "\n",
+                         portid);
+        /* >8 End of initializing all ports. */
+
+        if (rte_lcore_count() > 1)
+                printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
+
+        /* Start server main loop. */
         main_loop();
 
-        /* PUT YOUR CODE HERE (DPDK cleanup) */
+        /* clean up the EAL */
+        rte_eal_cleanup();
         cleanup();
         spdk_vmd_fini();
 
 exit:
+        rte_eal_cleanup();
         cleanup();
         spdk_env_fini();
         return rc;
