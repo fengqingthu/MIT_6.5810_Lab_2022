@@ -10,6 +10,8 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+/* For usleep(). */
+#include <unistd.h>
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -18,12 +20,15 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
-static const bool DEBUG = true;
+/* For testing and benchmarking. */
+static const bool DEBUG = false;
+static const bool BENCH = true;
+static const uint32_t NUM_REQ = 60;
+static const uint32_t QPS = 1;
+static const uint64_t TIMEOUT = 1000000UL; // us
 
+/* Hardcoded parameters. */
 static const uint16_t PORTID = 2U;
-static const uint16_t NUM_REQ = 10;
-static const uint16_t THROUGHPUT = 100;
-
 struct rte_ether_addr client_addr = {{0, 0, 0, 0, 0, 0}};
 struct rte_ether_addr server_addr = {{0x0c, 0x42, 0xa1, 0x8c, 0xdc, 0x24}};
 const uint64_t sector_sz = 512;
@@ -31,7 +36,6 @@ const uint64_t sector_sz = 512;
 /* Define the mempool globally */
 struct rte_mempool *mbuf_pool = NULL;
 
-/* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
 /*
  * Initializes a given port using global settings and with the RX buffers
@@ -109,6 +113,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
         if (retval != 0)
                 return retval;
 
+        /* Update client address. */
         client_addr = addr;
 
         printf("Port %u MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
@@ -139,7 +144,7 @@ construct_write_packet(void)
         void *pkt_h = rte_pktmbuf_mtod_offset(pkt, void *, 0);
 
         struct rte_ether_hdr eth_h;
-        eth_h.ether_type = RTE_ETHER_TYPE_TEB; // Not sure which frame type
+        eth_h.ether_type = RTE_ETHER_TYPE_TEB; // Not sure which frame type, just pick a rare one.
         eth_h.src_addr = client_addr;
         eth_h.dst_addr = server_addr;
         rte_memcpy(pkt_h, &eth_h, sizeof(struct rte_ether_hdr));
@@ -177,12 +182,16 @@ lcore_main()
 {
         uint16_t port;
         uint64_t hz = rte_get_timer_hz();
-        uint64_t begin = rte_rdtsc_precise();
-        uint64_t totalus = 0;
-        uint64_t indpdk = 0;
-        uint64_t startdpdk;
-        uint32_t seq = 0;
-        uint32_t rec = 0;
+        uint64_t interval = 1000000UL / QPS; // us
+        uint64_t sent_req[NUM_REQ];
+        uint64_t recv_resp[NUM_REQ];
+        uint64_t prev_tx = rte_rdtsc_precise();
+        uint64_t unloaded_latency_cycle = 0;
+
+        int sent = 0;
+        int rec = 0;
+
+        FILE *dp = fopen("/tmp/latency.txt", "a");
 
         /*
          * Check that the port is on the same NUMA node as the polling thread
@@ -205,52 +214,53 @@ lcore_main()
         {
                 RTE_ETH_FOREACH_DEV(port)
                 {
-                        /* Get burst of RX packets, from port1 */
+                        /* Get burst of RX packets. */
                         if (port != PORTID)
                                 continue;
 
                         struct rte_mbuf *bufs[BURST_SIZE];
                         struct rte_mbuf *pkt;
 
-                        if (seq < NUM_REQ)
+                        /* Till next interval is meet to keep up with the desired QPS. */
+                        if (sent < NUM_REQ && (rte_rdtsc_precise() - prev_tx) * 1000000 / hz >= interval)
                         {
                                 pkt = construct_write_packet();
 
                                 if (DEBUG)
                                 {
-                                        printf("To be sent: %d\n", seq);
+                                        printf("to be sent: %d\n", sent - 1);
                                         rte_pktmbuf_dump(stdout, pkt, pkt->pkt_len);
                                 }
 
                                 bufs[0] = pkt;
 
-                                startdpdk = rte_rdtsc_precise();
+                                prev_tx = rte_rdtsc_precise();
                                 const uint16_t nb_tx = rte_eth_tx_burst(port, 0, bufs, 1);
-                                indpdk += rte_rdtsc_precise() - startdpdk;
+                                sent_req[sent++] = rte_rdtsc_precise();
 
                                 if (unlikely(nb_tx != 1))
                                 {
                                         printf("req pkt transsmission failure\n");
+                                        exit(1);
                                 }
-                                seq++;
                         }
 
-                        startdpdk = rte_rdtsc_precise();
                         const uint16_t nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
-                        indpdk += rte_rdtsc_precise() - startdpdk;
 
                         if (unlikely(nb_rx == 0))
                                 continue;
+
+                        if (BENCH) {
+                                if (rec > 0 && (rte_rdtsc_precise() - recv_resp[rec - 1]) * 1000000 / hz > TIMEOUT) {
+                                        printf("haven't received response up to %ld us, stop benchmarking, QPS: %d\n", TIMEOUT, QPS);
+                                        exit(1);
+                                }
+                        }
 
                         /* Free received packets. */
                         uint8_t i;
                         for (i = 0; i < nb_rx; i++)
                         {
-                                if (DEBUG)
-                                {
-                                        printf("Received: %d\n", rec);
-                                        rte_pktmbuf_dump(stdout, bufs[i], bufs[i]->buf_len);
-                                }
 
                                 struct rte_ether_hdr *eth_h = rte_pktmbuf_mtod(bufs[i], struct rte_ether_hdr *);
                                 if (eth_h->ether_type != RTE_ETHER_TYPE_TEB)
@@ -263,13 +273,28 @@ lcore_main()
                                         continue;
                                 }
                                 
+                                if (DEBUG)
+                                {
+                                        printf("received: %d\n", rec);
+                                        rte_pktmbuf_dump(stdout, bufs[i], bufs[i]->buf_len);
+                                }
+
+                                recv_resp[rec] = rte_rdtsc_precise();
+                                unloaded_latency_cycle += recv_resp[rec] - sent_req[rec];
+                                fprintf(dp, "%ld\n", recv_resp[rec] - sent_req[rec]);
                                 rec++;
+
                                 int *rc = rte_pktmbuf_mtod_offset(bufs[i], int *, sizeof(struct rte_ether_hdr));
                                 if (*rc != 0)
                                 {
-                                        printf("received error resp, rc= %d\n", *rc);
-                                        rte_pktmbuf_free(bufs[i]);
-                                        continue;
+                                        if (BENCH) {
+                                                printf("received error resp, stop benchmarking, QPS: %d\n", QPS);
+                                                exit(1);
+                                        } else {
+                                                printf("received error resp, rc= %d\n", *rc);
+                                                rte_pktmbuf_free(bufs[i]);
+                                                continue;
+                                        }
                                 }
                                 if (DEBUG)
                                 {
@@ -287,10 +312,13 @@ lcore_main()
 
                                 if (rec == NUM_REQ)
                                 {
-                                        /* Record time stats. */
-                                        // printf("%d packets transmitted, rtt avg= %ldus, spent in dpdk avg= %ldus\n",
-                                        //        seq, ((rte_rdtsc_precise() - begin) * 1000000 / hz) / rec, (indpdk * 1000000 / hz) / rec);
-                                        rec++;
+                                        if (rec != sent) {
+                                                printf("error transmitted pkts not euqal to received pkts\n");
+                                        } else {
+                                                uint64_t avg_us = (unloaded_latency_cycle / rec) * 1000000 / hz;
+                                                printf("%d pkts transmitted at %d qps, average latency = %ldus\n", rec, QPS, avg_us);
+                                                exit(1);
+                                        }
                                 }
                                 rte_pktmbuf_free(bufs[i]);
                         }

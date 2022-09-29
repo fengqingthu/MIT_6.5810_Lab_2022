@@ -55,7 +55,17 @@
 #define BURST_SIZE 8
 
 static const uint16_t PORTID = 2U;
-static const bool DEBUG = true;
+static const bool DEBUG = false;
+static const bool BENCH = true;
+
+/* For benchmark. */
+static const int SAMPLE_REQ = 100000;
+uint64_t hz;
+uint64_t begin = 0;
+uint64_t indpdk = 0;
+uint64_t startdpdk;
+uint64_t inspdk = 0;
+uint64_t startspdk;
 
 /* ASSUMING THERE IS ONLY ONE SENDER. */
 struct rte_ether_addr client_addr = {{0, 0, 0, 0, 0, 0}};
@@ -192,8 +202,9 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 }
 
 /*
- * Send the response back to the client using DPDK.
- *
+ * Send the response back to the client using DPDK. This function is responsible to
+ * free the input ctx and any underlying strings.
+ * 
  * This function should be invoked by SPDK's callback functions.
  * For the first step, use a mock implementation here to test main_loop().
  */
@@ -252,7 +263,10 @@ static void send_resp_to_client(struct req_context *ctx)
         pkt->refcnt = 1;
         pkt->next = NULL;
 
+        startdpdk = rte_rdtsc_precise();
         const uint16_t nb_tx = rte_eth_tx_burst(PORTID, 0, bufs, 1);
+        indpdk += rte_rdtsc_precise() - startdpdk;
+
         if (unlikely(nb_tx == 0))
         {
                 printf("resp pkt transmission failure\n");
@@ -272,12 +286,14 @@ static void send_resp_to_client(struct req_context *ctx)
         // else
         //         printf("write lba=%ld: %s\n", ctx->lba, ctx->req_data);
 
+        /* Note resp_data is a pointer to the buf sent to spdk. */
         free(ctx->req_data);
         free(ctx);
 }
 
 /*
- * Takes in a buffer of BURST_SIZE, return the number of requests received.
+ * Takes in a buffer with length BURST_SIZE of pointers to req_context,
+ * return the number of requests received.
  *
  */
 static uint16_t recv_req_from_client(struct req_context **ctxs)
@@ -440,13 +456,14 @@ static void handle_read_req(struct req_context *ctx)
                                     SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
         if (!cb_args->buf)
         {
-                printf("Failed to allocate buffer\n");
+                printf("failed to allocate buffer\n");
                 free(cb_args);
                 free(ctx);
                 return;
         }
 
         /* Now submit a cmd to read data from the 1st sector. */
+        startspdk = rte_rdtsc_precise();
         int rc = spdk_nvme_ns_cmd_read(
             selected_ns, qpair,
             cb_args->buf,  /* The buffer to store the read data */
@@ -455,9 +472,11 @@ static void handle_read_req(struct req_context *ctx)
             read_complete, /* Callback to invoke when the read is done. */
             cb_args,       /* Argument to pass to the callback. */
             0);
+        inspdk += rte_rdtsc_precise() - startspdk;
+
         if (rc != 0)
         {
-                printf("Failed to submit read cmd\n");
+                printf("failed to submit read cmd\n");
                 ctx->rc = rc;
                 send_resp_to_client(ctx);
                 spdk_free(cb_args->buf);
@@ -481,7 +500,7 @@ static void handle_write_req(struct req_context *ctx)
                                     SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
         if (!cb_args->buf)
         {
-                printf("Failed to allocate buffer\n");
+                printf("failed to allocate buffer\n");
                 free(cb_args);
                 free(ctx->req_data);
                 free(ctx);
@@ -492,6 +511,7 @@ static void handle_write_req(struct req_context *ctx)
         snprintf(cb_args->buf, sector_sz, "%s", ctx->req_data);
 
         /* Submit a cmd to write data into the 1st sector. */
+        startspdk = rte_rdtsc_precise();
         int rc = spdk_nvme_ns_cmd_write(
             selected_ns, qpair,
             cb_args->buf,   /* The data to write */
@@ -500,9 +520,11 @@ static void handle_write_req(struct req_context *ctx)
             write_complete, /* Callback to invoke when the write is done. */
             cb_args,        /* Argument to pass to the callback. */
             0);
+        inspdk += rte_rdtsc_precise() - startspdk;
+
         if (rc != 0)
         {
-                printf("Failed to submit write cmd\n");
+                printf("failed to submit write cmd\n");
                 ctx->rc = rc;
                 send_resp_to_client(ctx);
                 spdk_free(cb_args->buf);
@@ -516,6 +538,11 @@ static void handle_write_req(struct req_context *ctx)
 static void main_loop(void)
 {
         uint16_t port;
+
+        hz = rte_get_timer_hz();
+        int recv_req = 0;
+	
+
         /*
          * Check that the port is on the same NUMA node as the polling thread
          * for best performance.
@@ -551,9 +578,27 @@ static void main_loop(void)
                         struct req_context *ctxs[BURST_SIZE];
                         struct req_context *ctx;
 
+
+                        startdpdk = rte_rdtsc_precise();
                         uint16_t nb_req = recv_req_from_client(ctxs);
+                        indpdk += ((rte_rdtsc_precise() - startdpdk) * 1000000 / hz);
+
                         if (nb_req > 0)
                         {
+                                if (begin == 0)
+                                        begin = rte_rdtsc_precise();
+                                recv_req += nb_req;
+                                if (BENCH && recv_req > SAMPLE_REQ) {
+                                        printf("---------- have sampled %d requests ----------\n", SAMPLE_REQ);
+                                        printf("total time: %ldus\n", (rte_rdtsc_precise() - begin) * 1000000 / hz );
+                                        printf("in dpdk: %ldus\n", indpdk * 1000000 / hz);
+                                        printf("in spdk: %ldus\n", inspdk * 1000000 / hz);
+                                        printf("avg time: %ldus\n", (rte_rdtsc_precise() - begin) * (1000000 / SAMPLE_REQ) / hz );
+                                        printf("in dpdk: %ldus\n", indpdk * (1000000 / SAMPLE_REQ) / hz);
+                                        printf("in spdk: %ldus\n", inspdk * (1000000 / SAMPLE_REQ) / hz);
+                                        exit(0);
+                                }
+
                                 for (int i = 0; i < nb_req; i++)
                                 {
                                         ctx = ctxs[i];

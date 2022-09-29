@@ -1,4 +1,5 @@
 *.DS_Store
 lec*
+spdk
 dpdk
 Qing*
