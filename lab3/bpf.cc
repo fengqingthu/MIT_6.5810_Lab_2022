@@ -66,11 +66,11 @@ static char buf[MAX_LOG_LEN];
 // this is reentrant, allowing you to print to STDOUT for debugging safely
 void safe_log(const char *fmt, ...)
 {
-        va_list ptr;
+	va_list ptr;
 
-        va_start(ptr, fmt);
-        vsnprintf(buf, MAX_LOG_LEN, fmt, ptr);
-        va_end(ptr);
+	va_start(ptr, fmt);
+	vsnprintf(buf, MAX_LOG_LEN, fmt, ptr);
+	va_end(ptr);
 	write(1, buf, strlen(buf));
 }
 
@@ -83,10 +83,9 @@ static void emulator(int nr, siginfo_t *info, void *void_context)
 		return;
 	
 	int syscall;
-	// char *pathname;
+	char *pathname;
 	int fd;
 	void *buf;
-
 
 	syscall = ctx->uc_mcontext.gregs[REG_SYSCALL];
 	switch (syscall)
@@ -97,9 +96,8 @@ static void emulator(int nr, siginfo_t *info, void *void_context)
 		
 	case __NR_open:
 		/* The open() call should return the length of input string. */
-		// pathname = (char *) ctx->uc_mcontext.gregs[REG_ARG0];
-		/* How to get the length of pathname -Use the address of flags arg minus the pointer? */
-		ctx->uc_mcontext.gregs[REG_RESULT] = &ctx->uc_mcontext.gregs[REG_ARG1] - &ctx->uc_mcontext.gregs[REG_ARG0];
+		pathname = (char *) ctx->uc_mcontext.gregs[REG_ARG0];
+		ctx->uc_mcontext.gregs[REG_RESULT] = (int) strlen(pathname);
 		break;
 
 	case __NR_read:
@@ -153,20 +151,14 @@ static int install_filter(void)
 		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
 		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_exit, 0, 1),
 		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
-		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_read, 1, 0),
-		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_write, 0, 2),
 
-		/* Check that read is only using stdin. */
-		// BPF_STMT(BPF_LD+BPF_W+BPF_ABS, syscall_arg(0)),
-		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDIN_FILENO, 4, 0),
-		// BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_write, 0, 2),
 
 		/* Check that write is only using stdout */
 		BPF_STMT(BPF_LD+BPF_W+BPF_ABS, syscall_arg(0)),
 		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDOUT_FILENO, 1, 0),
+		
 		/* Trap all other attempts. */
-		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDERR_FILENO, 1, 2),
-
 		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_TRAP),
 		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),
