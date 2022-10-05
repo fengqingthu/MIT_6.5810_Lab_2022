@@ -14,6 +14,7 @@
 #define __USE_GNU 1
 #define _GNU_SOURCE 1
 
+
 #include <linux/types.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -27,6 +28,9 @@
 #include <sys/prctl.h>
 #include <unistd.h>
 #include <errno.h>
+
+#define syscall_arg(_n) (offsetof(struct seccomp_data, args[_n]))
+#define syscall_nr (offsetof(struct seccomp_data, nr))
 
 #if defined(__i386__)
 #define REG_RESULT	REG_EAX
@@ -70,15 +74,118 @@ void safe_log(const char *fmt, ...)
 	write(1, buf, strlen(buf));
 }
 
+static void emulator(int nr, siginfo_t *info, void *void_context)
+{
+	ucontext_t *ctx = (ucontext_t *)(void_context);
+	if (info->si_code != SYS_SECCOMP)
+		return;
+	if (!ctx)
+		return;
+	
+	int syscall;
+	// char *pathname;
+	int fd;
+	void *buf;
+
+
+	syscall = ctx->uc_mcontext.gregs[REG_SYSCALL];
+	switch (syscall)
+	{
+	case __NR_close:
+		/* Emulate close() as a no-op. */
+		break;
+		
+	case __NR_open:
+		/* The open() call should return the length of input string. */
+		// pathname = (char *) ctx->uc_mcontext.gregs[REG_ARG0];
+		/* How to get the length of pathname -Use the address of flags arg minus the pointer? */
+		ctx->uc_mcontext.gregs[REG_RESULT] = &ctx->uc_mcontext.gregs[REG_ARG1] - &ctx->uc_mcontext.gregs[REG_ARG0];
+		break;
+
+	case __NR_read:
+		/* Return arg2, copy arg0 to arg1. */
+		ctx->uc_mcontext.gregs[REG_RESULT] = (ssize_t) ctx->uc_mcontext.gregs[REG_ARG2];
+		fd = (int) ctx->uc_mcontext.gregs[REG_ARG0];
+		buf = (void *) ctx->uc_mcontext.gregs[REG_ARG1];
+		memcpy(buf, &fd, 1);
+
+	default:
+		/* Weird system calls, ignore. */
+		break;
+	}
+	return;
+}
+
 static int install_emulator(void)
 {
-	// your code here
+	struct sigaction act;
+	sigset_t mask;
+	memset(&act, 0, sizeof(act));
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGSYS);
+
+	act.sa_sigaction = &emulator;
+	act.sa_flags = SA_SIGINFO;
+	if (sigaction(SIGSYS, &act, NULL) < 0) {
+		perror("sigaction");
+		return -1;
+	}
+	if (sigprocmask(SIG_UNBLOCK, &mask, NULL)) {
+		perror("sigprocmask");
+		return -1;
+	}
 	return 0;
 }
 
 static int install_filter(void)
 {
-	// your code here
+	struct sock_filter filter[] = {
+		/* Grab the system call number */
+		BPF_STMT(BPF_LD+BPF_W+BPF_ABS, syscall_nr),
+		/* Jump table for the allowed syscalls */
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_rt_sigreturn, 0, 1),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+#ifdef __NR_sigreturn
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_sigreturn, 0, 1),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+#endif
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_exit_group, 0, 1),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_exit, 0, 1),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_read, 1, 0),
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_write, 0, 2),
+
+		/* Check that read is only using stdin. */
+		// BPF_STMT(BPF_LD+BPF_W+BPF_ABS, syscall_arg(0)),
+		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDIN_FILENO, 4, 0),
+		// BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),
+
+		/* Check that write is only using stdout */
+		BPF_STMT(BPF_LD+BPF_W+BPF_ABS, syscall_arg(0)),
+		BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDOUT_FILENO, 1, 0),
+		/* Trap all other attempts. */
+		// BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, STDERR_FILENO, 1, 2),
+
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_TRAP),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+		BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)(sizeof(filter)/sizeof(filter[0])),
+		.filter = filter,
+	};
+
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+		perror("prctl(NO_NEW_PRIVS)");
+		return 1;
+	}
+
+
+	if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) {
+		perror("prctl");
+		return 1;
+	}
 	return 0;
 }
 
